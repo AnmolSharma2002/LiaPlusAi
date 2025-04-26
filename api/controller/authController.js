@@ -1,17 +1,30 @@
 const bcrypt = require("bcryptjs");
 const jwt = require("jsonwebtoken");
-const { Resend } = require("resend");
 const crypto = require("crypto");
 const User = require("../models/user");
 const emailTemplate = require("../emailTemplate/emailTemplate");
 
-// Initialize Resend client
-const resend = new Resend(process.env.RESEND_API_KEY);
+let Resend;
+let resend;
+
+// Dynamically import 'resend' (since it's ESM-only)
+(async () => {
+  const resendModule = await import("resend");
+  Resend = resendModule.Resend;
+  resend = new Resend(process.env.RESEND_API_KEY);
+})();
 
 // Signup controller
 module.exports.signup = async (req, res) => {
   try {
     const { name, email, password, role } = req.body;
+
+    // Check if resend is initialized
+    if (!resend) {
+      return res
+        .status(500)
+        .json({ errors: [{ msg: "Email service not initialized" }] });
+    }
 
     // Check if user already exists
     let user = await User.findOne({ email });
@@ -60,7 +73,6 @@ module.exports.signup = async (req, res) => {
   }
 };
 
-// Login controller
 module.exports.login = async (req, res) => {
   try {
     const { email, password } = req.body;
@@ -90,7 +102,17 @@ module.exports.login = async (req, res) => {
       expiresIn: "1h",
     });
 
-    res.json({ token });
+    // Return token and user data
+    res.json({
+      success: true,
+      token,
+      user: {
+        id: user._id,
+        name: user.name,
+        email: user.email,
+        role: user.role,
+      },
+    });
   } catch (error) {
     console.error("Login error:", error.message);
     res.status(500).json({ errors: [{ msg: "Server error" }] });
