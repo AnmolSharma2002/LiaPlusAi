@@ -1,108 +1,83 @@
-const bcrypt = require("bcryptjs");
-const jwt = require("jsonwebtoken");
-const crypto = require("crypto");
-const User = require("../models/user");
-const emailTemplate = require("../emailTemplate/emailTemplate");
+const User = require("../models/User");
+const { validationResult } = require("express-validator");
 
-let Resend;
-let resend;
-
-// Dynamically import 'resend' (since it's ESM-only)
-(async () => {
-  const resendModule = await import("resend");
-  Resend = resendModule.Resend;
-  resend = new Resend(process.env.RESEND_API_KEY);
-})();
-
-// Signup controller
-module.exports.signup = async (req, res) => {
+// @desc    Register user
+// @route   POST /api/auth/register
+// @access  Public
+exports.register = async (req, res) => {
   try {
+    const errors = validationResult(req);
+    if (!errors.isEmpty()) {
+      return res.status(400).json({ errors: errors.array() });
+    }
+
     const { name, email, password, role } = req.body;
 
-    // Check if resend is initialized
-    if (!resend) {
-      return res
-        .status(500)
-        .json({ errors: [{ msg: "Email service not initialized" }] });
-    }
-
-    // Check if user already exists
+    // Check if user exists
     let user = await User.findOne({ email });
+
     if (user) {
-      return res.status(400).json({ errors: [{ msg: "User already exists" }] });
+      return res.status(400).json({ message: "User already exists" });
     }
 
-    // Hash password
-    const salt = await bcrypt.genSalt(10);
-    const hashedPassword = await bcrypt.hash(password, salt);
-
-    // Create verification token
-    const verificationToken = crypto.randomBytes(32).toString("hex");
-
-    // Create new user
+    // Create user
     user = new User({
       name,
       email,
-      password: hashedPassword,
-      role: role || "user",
-      verificationToken,
+      password,
+      role: role || "user", // Default to user if no role provided
     });
+
     await user.save();
 
-    // Send verification email
-    const verificationLink = `http://localhost:8000/api/auth/verify-email?token=${verificationToken}`;
-    const { data, error } = await resend.emails.send({
-      from: "RBAC Blog <onboarding@resend.dev>",
-      to: [email],
-      subject: "Verify Your Email",
-      html: emailTemplate({ name, verificationLink }),
+    // Generate token
+    const token = user.getSignedJwtToken();
+
+    res.status(201).json({
+      success: true,
+      token,
+      user: {
+        id: user._id,
+        name: user.name,
+        email: user.email,
+        role: user.role,
+      },
     });
-
-    if (error) {
-      return res
-        .status(500)
-        .json({ errors: [{ msg: "Failed to send verification email" }] });
-    }
-
-    res
-      .status(201)
-      .json({ message: "User registered. Please verify your email." });
-  } catch (error) {
-    console.error("Signup error:", error.message);
-    res.status(500).json({ errors: [{ msg: "Server error" }] });
+  } catch (err) {
+    console.error(err.message);
+    res.status(500).json({ message: "Server error" });
   }
 };
 
-module.exports.login = async (req, res) => {
+// @desc    Login user
+// @route   POST /api/auth/login
+// @access  Public
+exports.login = async (req, res) => {
   try {
+    const errors = validationResult(req);
+    if (!errors.isEmpty()) {
+      return res.status(400).json({ errors: errors.array() });
+    }
+
     const { email, password } = req.body;
 
-    // Find user
-    const user = await User.findOne({ email });
+    // Check for user
+    const user = await User.findOne({ email }).select("+password");
+
     if (!user) {
-      return res.status(400).json({ errors: [{ msg: "Invalid credentials" }] });
+      return res.status(401).json({ message: "Invalid credentials" });
     }
 
-    // Check if email is verified
-    if (!user.isVerified) {
-      return res
-        .status(400)
-        .json({ errors: [{ msg: "Please verify your email first" }] });
-    }
+    // Check if password matches
+    const isMatch = await user.matchPassword(password);
 
-    // Compare password
-    const isMatch = await bcrypt.compare(password, user.password);
     if (!isMatch) {
-      return res.status(400).json({ errors: [{ msg: "Invalid credentials" }] });
+      return res.status(401).json({ message: "Invalid credentials" });
     }
 
-    // Generate JWT
-    const payload = { userId: user._id, role: user.role };
-    const token = jwt.sign(payload, process.env.JWT_SECRET, {
-      expiresIn: "1h",
-    });
+    // Generate token
+    const token = user.getSignedJwtToken();
 
-    // Return token and user data
     res.json({
       success: true,
       token,
@@ -113,34 +88,31 @@ module.exports.login = async (req, res) => {
         role: user.role,
       },
     });
-  } catch (error) {
-    console.error("Login error:", error.message);
-    res.status(500).json({ errors: [{ msg: "Server error" }] });
+  } catch (err) {
+    console.error(err.message);
+    res.status(500).json({ message: "Server error" });
   }
 };
 
-// Verify email controller
-module.exports.verifyEmail = async (req, res) => {
+// @desc    Get current logged in user
+// @route   GET /api/auth/me
+// @access  Private
+exports.getMe = async (req, res) => {
   try {
-    const { token } = req.query;
+    const user = await User.findById(req.user.id);
 
-    // Find user by verification token
-    const user = await User.findOne({ verificationToken: token });
-    if (!user) {
-      return res
-        .status(400)
-        .json({ errors: [{ msg: "Invalid or expired verification token" }] });
-    }
-
-    // Update user
-    user.isVerified = true;
-    user.verificationToken = undefined;
-    await user.save();
-
-    // Redirect to frontend login page
-    res.redirect(`${process.env.FRONTEND_URL}/login`);
-  } catch (error) {
-    console.error("Verify email error:", error.message);
-    res.status(500).json({ errors: [{ msg: "Server error" }] });
+    res.json({
+      success: true,
+      user: {
+        id: user._id,
+        name: user.name,
+        email: user.email,
+        role: user.role,
+        createdAt: user.createdAt,
+      },
+    });
+  } catch (err) {
+    console.error(err.message);
+    res.status(500).json({ message: "Server error" });
   }
 };
